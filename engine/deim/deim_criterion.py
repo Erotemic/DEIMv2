@@ -402,8 +402,56 @@ class DEIMCriterion(nn.Module):
                     l_dict = {k + '_dn_pre': v for k, v in l_dict.items()}
                     losses.update(l_dict)
 
+        # DDP key-set alignment.
+        # ----------------------
+        # When a batch on one rank has no GT boxes, the denoising
+        # mechanism doesn't fire and the model omits dn_outputs /
+        # dn_pre_outputs. Other ranks (with GT) DO produce those, so
+        # their loss_dict has ~22 extra `*_dn_*` keys.
+        # dist_utils.reduce_dict in det_engine.train_one_epoch then
+        # tries to torch.stack mismatched-shape value tensors and the
+        # subsequent NCCL all_reduce deadlocks (PyTorch reports the
+        # canonical "Watchdog caught collective operation timeout" at
+        # the next collective, but the divergence happens here).
+        #
+        # Fix: all_gather the local key set per rank, union them, and
+        # pad missing keys with zero tensors so every rank contributes
+        # the same shape to reduce_dict. One small object gather per
+        # forward — cheap relative to the work the model is doing.
+        # Patched in the kit's vendored DEIMv2; mirror upstream if the
+        # submodule is updated. See:
+        #   projects/viame_sealions_2026/scripts/sealion-pup-nonpup-2480.out
+        # for the original failure signature (count=47 vs count=25
+        # ALLREDUCE divergence).
+        losses = self._align_loss_keys_across_ranks(losses)
+
         # For debugging Objects365 pre-train.
         losses = {k:torch.nan_to_num(v, nan=0.0) for k, v in losses.items()}
+        return losses
+
+    @staticmethod
+    def _align_loss_keys_across_ranks(losses):
+        if not is_dist_available_and_initialized():
+            return losses
+        world_size = get_world_size()
+        if world_size < 2:
+            return losses
+        local_keys = sorted(losses.keys())
+        gathered = [None] * world_size
+        torch.distributed.all_gather_object(gathered, local_keys)
+        union = set()
+        for k_list in gathered:
+            if k_list is not None:
+                union.update(k_list)
+        missing = union - set(local_keys)
+        if not missing:
+            return losses
+        # Use a representative existing tensor for device/dtype so
+        # downstream sum(losses.values()) doesn't see device mismatch.
+        ref = next(iter(losses.values()))
+        zero = torch.zeros((), device=ref.device, dtype=ref.dtype)
+        for k in missing:
+            losses[k] = zero
         return losses
 
     def get_loss_meta_info(self, loss, outputs, targets, indices):
