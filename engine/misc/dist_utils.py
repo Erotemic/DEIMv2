@@ -63,9 +63,18 @@ def setup_distributed(print_rank: int=0, print_method: str='builtin', seed: int=
 
 
 def setup_print(is_main, method='builtin'):
-    """This function disables printing when not in master process
+    """This function disables printing when not in master process,
+    and prefixes every emitted line with an ISO-8601 timestamp so a
+    long-running training run is easy to correlate against slurm
+    timestamps, NCCL traces, and external events.
+
+    Timestamping can be disabled per-call by passing ``timestamp=False``
+    (e.g. when emitting a multi-line block where the prefix would be
+    cosmetically wrong). The pre-existing ``force=True`` kwarg is
+    preserved.
     """
     import builtins as __builtin__
+    import datetime as _dt
 
     if method == 'builtin':
         builtin_print = __builtin__.print
@@ -79,8 +88,13 @@ def setup_print(is_main, method='builtin'):
 
     def print(*args, **kwargs):
         force = kwargs.pop('force', False)
+        timestamp = kwargs.pop('timestamp', True)
         if is_main or force:
-            builtin_print(*args, **kwargs)
+            if timestamp:
+                ts = _dt.datetime.now().strftime('[%Y-%m-%dT%H:%M:%S]')
+                builtin_print(ts, *args, **kwargs)
+            else:
+                builtin_print(*args, **kwargs)
 
     __builtin__.print = print
 
