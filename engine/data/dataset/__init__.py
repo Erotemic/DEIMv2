@@ -14,3 +14,12 @@ from .coco_eval import CocoEvaluator
 from .coco_utils import get_coco_api_from_dataset
 from .voc_detection import VOCDetection
 from .voc_eval import VOCEvaluator
+
+# kit extension — WebDataset-backed CocoDetection. Import for side-effect
+# so the @register() decorator runs and YAMLConfig can resolve
+# `type: WebDatasetCocoDetection`. Optional: skip silently when its
+# runtime deps (webdataset, kwcoco_dataloader) aren't installed.
+try:
+    from .wds_coco_dataset import WebDatasetCocoDetection  # noqa: F401
+except Exception:
+    pass
