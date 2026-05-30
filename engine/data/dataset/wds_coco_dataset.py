@@ -161,10 +161,56 @@ class WebDatasetCocoDetection(torch.utils.data.IterableDataset, DetDataset):
     # so misconfigs fail fast rather than producing junk batches.
 
     def __len__(self):
-        raise NotImplementedError(
-            "WebDatasetCocoDetection is iterable; nominal length unknown. "
-            "If you need len(), set epoch_length and use that instead."
-        )
+        """Total sample count for one logical epoch.
+
+        Resolution order:
+
+        1. If ``epoch_length > 0`` was passed at construction, return
+           it. Lets the caller pin a definite number of samples per
+           epoch regardless of underlying corpus size.
+        2. Otherwise, sum the per-shard counts read from each
+           ``*.tar.index.json`` in the bucket subdirs. These are
+           written by the kwcoco_dataloader writer alongside every
+           closed shard, so the count is exact and cheap to compute.
+        3. As a last resort (no index files yet, e.g. mid-build),
+           raise informatively.
+
+        DEIMv2's solver needs ``len()`` for:
+          * ``FlatCosineLRScheduler``'s warmup/flat/cosine schedule
+          * ``DataLoader.__len__`` (the IterableDataset path returns
+            ``len(dataset)`` directly)
+          * Per-epoch progress bars.
+
+        Mosaic-with-cache + transforms work without ``len()``; we
+        define one anyway so DEIMv2's scheduler can plan its
+        warmup/flat boundaries.
+        """
+        if self._epoch_length > 0:
+            return self._epoch_length
+
+        import json
+        total = 0
+        index_files = sorted(self.shards_dpath.glob("*/*.tar.index.json"))
+        if not index_files:
+            # Fall back to .tar count × maxcount estimate so the
+            # scheduler can still compute roughly-correct boundaries.
+            tars = sorted(self.shards_dpath.glob("*/*.tar"))
+            if not tars:
+                raise NotImplementedError(
+                    f"WebDatasetCocoDetection __len__: no .tar.index.json "
+                    f"or .tar files under {self.shards_dpath}; pass "
+                    "epoch_length explicitly or finish the shard build."
+                )
+            return len(tars) * 5000   # writer maxcount default
+
+        for idx_fpath in index_files:
+            try:
+                data = json.loads(idx_fpath.read_text())
+            except Exception:
+                continue
+            fnames = data.get("fnames") or []
+            total += len(fnames)
+        return total
 
     def load_item(self, idx):
         raise NotImplementedError(
