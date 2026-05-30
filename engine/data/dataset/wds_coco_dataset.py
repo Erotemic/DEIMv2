@@ -209,7 +209,15 @@ class WebDatasetCocoDetection(torch.utils.data.IterableDataset, DetDataset):
             except Exception:
                 continue
             fnames = data.get("fnames") or []
-            total += len(fnames)
+            # Each sample contributes multiple entries to ``fnames``
+            # (one per sidecar: ``<key>.jpg`` + ``<key>.json`` today,
+            # potentially more later). Count primaries — image files —
+            # so the total equals the sample count regardless of how
+            # many sidecars the writer emits.
+            total += sum(
+                1 for f in fnames
+                if isinstance(f, str) and f.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))
+            )
         return total
 
     def load_item(self, idx):
