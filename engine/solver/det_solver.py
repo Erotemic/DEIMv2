@@ -126,6 +126,28 @@ class DetSolver(BaseSolver):
                 self.device
             )
 
+            # Broadcast test_stats from rank 0 so every rank has the
+            # SAME dict keys before the conditional save loop below.
+            # CocoEvaluator's accumulate/summarize behavior leaves the
+            # stats tensor populated on rank 0 but can leave it empty
+            # or differently-shaped on other ranks, so the subsequent
+            # `for k in test_stats:` loop iterates a different number
+            # of times per rank — and each iteration potentially calls
+            # save_on_master, which contains a collective barrier. The
+            # rank with FEWER iterations skips those barriers; the
+            # rank with MORE iterations reaches the next epoch's
+            # load_resume_state at line 84 BEFORE the slow rank has
+            # finished its save. The slow rank then hits
+            # FileNotFoundError: best_stg1.pth doesn't exist yet.
+            # (yardrat 2026-05-30 docker-gpu2x-jpeg reproduced this.)
+            # Broadcasting guarantees the for-loop body fires the
+            # same way on every rank → save_on_master invariant
+            # holds → barrier counts match.
+            if dist_utils.is_dist_available_and_initialized():
+                obj = [test_stats] if dist_utils.is_main_process() else [None]
+                torch.distributed.broadcast_object_list(obj, src=0)
+                test_stats = obj[0] if obj[0] is not None else test_stats
+
             for k in test_stats:
                 if self.writer and dist_utils.is_main_process():
                     for i, v in enumerate(test_stats[k]):
