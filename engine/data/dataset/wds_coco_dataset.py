@@ -89,6 +89,14 @@ class WebDatasetCocoDetection(torch.utils.data.IterableDataset, DetDataset):
         chunk_size: int = 1,
         num_workers_hint: int = 4,
         epoch_length: int = 0,
+        # Upstream CocoDetection config keys that the YAML merger leaks
+        # through from configs/dataset/coco_detection.yml when our
+        # __include__ chain inherits from it. Accept-and-ignore so
+        # YAMLConfig.create()'s kwarg-passthrough doesn't error on
+        # them. The streaming reader resolves images from the shard
+        # tar archives, not from a filesystem path.
+        img_folder: Optional[str] = None,
+        ann_file: Optional[str] = None,
     ):
         super().__init__()
         from kwcoco_dataloader.readers.detection import (
