@@ -89,6 +89,17 @@ class WebDatasetCocoDetection(torch.utils.data.IterableDataset, DetDataset):
         chunk_size: int = 1,
         num_workers_hint: int = 4,
         epoch_length: int = 0,
+        # WebDatasetStream knobs. Defaults bound the per-worker memory
+        # footprint: shuffle_buffer=128 decoded samples × 4 workers ×
+        # ~3 MB/tile = ~1.5 GB host RAM total, vs the upstream
+        # shuffle_buffer=1024 default which can balloon to 12 GB and
+        # silently OOM-kill workers under tight cgroups (gen002 2552
+        # 2026-05-30: 3 of 4 workers died around iter 3000-3500 with
+        # no in-process log; surviving worker can't keep the main
+        # consumer fed, training appears to "hang"). Override via
+        # the YAML config's stream_kwargs field if more shuffle
+        # randomness is needed.
+        stream_kwargs: Optional[dict] = None,
         # Upstream CocoDetection config keys that the YAML merger leaks
         # through from configs/dataset/coco_detection.yml when our
         # __include__ chain inherits from it. Accept-and-ignore so
@@ -127,6 +138,13 @@ class WebDatasetCocoDetection(torch.utils.data.IterableDataset, DetDataset):
         self._bucket_weights = bucket_weights or {}
         self._chunk_size = int(chunk_size)
         self._num_workers_hint = int(num_workers_hint)
+        # Keep WebDatasetStream's shuffle buffers small enough that
+        # 4 workers × per-worker buffer doesn't OOM the host. Users
+        # can pass {"shuffle_buffer": ..., "shardshuffle": ...} to
+        # override.
+        self._stream_kwargs = {"shuffle_buffer": 128, "shardshuffle": 8}
+        if stream_kwargs:
+            self._stream_kwargs.update(stream_kwargs)
         self._epoch_length = int(epoch_length)
         self._epoch = 0
         # Memoize __len__. DEIMv2's MetricLogger.log_every() calls
@@ -253,7 +271,10 @@ class WebDatasetCocoDetection(torch.utils.data.IterableDataset, DetDataset):
         # streams + weights. We override per-bucket weights only when
         # the caller passed bucket_weights (rare); otherwise use the
         # footer-derived defaults.
-        bucket_set = load_bucket_streams(shards_dpath=self.shards_dpath)
+        bucket_set = load_bucket_streams(
+            shards_dpath=self.shards_dpath,
+            stream_kwargs=self._stream_kwargs,
+        )
         if not bucket_set.streams:
             return iter(())
         if self._bucket_weights:
