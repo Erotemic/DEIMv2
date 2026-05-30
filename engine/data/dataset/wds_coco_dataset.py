@@ -129,6 +129,12 @@ class WebDatasetCocoDetection(torch.utils.data.IterableDataset, DetDataset):
         self._num_workers_hint = int(num_workers_hint)
         self._epoch_length = int(epoch_length)
         self._epoch = 0
+        # Memoize __len__. DEIMv2's MetricLogger.log_every() calls
+        # len(loader) every iteration (loader.__len__ → dataset.__len__),
+        # and ours walks every *.tar.index.json + json-decodes them on
+        # each call. With ~hundreds of shards that's seconds per iter
+        # spent re-parsing the same data. Cache after the first compute.
+        self._len_cached: Optional[int] = None
 
         # Probe at construction so a missing shards path fails loudly,
         # not after the first epoch starts.
@@ -188,6 +194,9 @@ class WebDatasetCocoDetection(torch.utils.data.IterableDataset, DetDataset):
         if self._epoch_length > 0:
             return self._epoch_length
 
+        if self._len_cached is not None:
+            return self._len_cached
+
         import json
         total = 0
         index_files = sorted(self.shards_dpath.glob("*/*.tar.index.json"))
@@ -218,6 +227,7 @@ class WebDatasetCocoDetection(torch.utils.data.IterableDataset, DetDataset):
                 1 for f in fnames
                 if isinstance(f, str) and f.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))
             )
+        self._len_cached = total
         return total
 
     def load_item(self, idx):
