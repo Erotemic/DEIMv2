@@ -113,9 +113,15 @@ class WebDatasetCocoDetection(torch.utils.data.IterableDataset, DetDataset):
             # Identity mapping when no scheme collapse needed (e.g.
             # single_sealion where every kept source class is "sealion").
             source_to_target = {n: n for n in self.category_names}
+        # SchemeMapping's API uses (target_order, mapping) names.
+        # `unmapped_policy='drop'` (the default) means raw source
+        # classes not in `mapping` are silently dropped per-sample.
+        # That handles the scheme YAML's `drop:` list implicitly:
+        # raw labels there are absent from the mapping, so they fall
+        # through to the unmapped policy.
         self.scheme = SchemeMapping(
-            source_to_target=dict(source_to_target),
-            target_names=list(self.category_names),
+            target_order=list(self.category_names),
+            mapping=dict(source_to_target),
         )
 
         self._bucket_weights = bucket_weights or {}
