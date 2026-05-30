@@ -231,19 +231,24 @@ class WebDatasetCocoDetection(torch.utils.data.IterableDataset, DetDataset):
         from kwcoco_dataloader.readers.detection import (
             load_bucket_streams, WeightedChunkMix,
         )
-        streams = load_bucket_streams(
-            shards_dpath=self.shards_dpath,
-            num_workers_hint=self._num_workers_hint,
-            seed=self._epoch,
-        )
-        if not streams:
+        # load_bucket_streams returns a BucketStreamSet with aligned
+        # streams + weights. We override per-bucket weights only when
+        # the caller passed bucket_weights (rare); otherwise use the
+        # footer-derived defaults.
+        bucket_set = load_bucket_streams(shards_dpath=self.shards_dpath)
+        if not bucket_set.streams:
             return iter(())
-        weights = [
-            float(self._bucket_weights.get(s.bucket_name, 1.0))
-            for s in streams
-        ]
+        if self._bucket_weights:
+            weights = [
+                float(self._bucket_weights.get(d.name, w))
+                for d, w in zip(bucket_set.bucket_dirs, bucket_set.weights)
+            ]
+        else:
+            weights = bucket_set.weights
         return iter(WeightedChunkMix(
-            streams=streams, weights=weights, chunk_size=self._chunk_size,
+            bucket_set.streams, weights,
+            chunk_size=self._chunk_size,
+            seed=self._epoch,
         ))
 
     def __iter__(self):

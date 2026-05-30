@@ -73,7 +73,12 @@ class DetSolver(BaseSolver):
             self.train_dataloader.set_epoch(epoch)
             # self.train_dataloader.dataset.set_epoch(epoch)
             if dist_utils.is_dist_available_and_initialized():
-                self.train_dataloader.sampler.set_epoch(epoch)
+                # IterableDataset auto-gets _InfiniteConstantSampler from
+                # torch which lacks set_epoch; only call when the sampler
+                # supports it (e.g. DistributedSampler does).
+                sampler = self.train_dataloader.sampler
+                if hasattr(sampler, "set_epoch"):
+                    sampler.set_epoch(epoch)
 
             if epoch == self.train_dataloader.collate_fn.stop_epoch:
                 self.load_resume_state(str(self.output_dir / 'best_stg1.pth'))
