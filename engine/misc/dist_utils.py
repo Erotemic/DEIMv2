@@ -168,6 +168,15 @@ def de_model(model):
 
 def warp_loader(loader, shuffle=False):
     if is_dist_available_and_initialized():
+        # IterableDataset doesn't define len() and can't be wrapped
+        # in a DistributedSampler (which calls len(dataset) in its
+        # __init__). The dataset is responsible for its own per-rank
+        # + per-worker splitting — WebDataset handles this via
+        # split_by_node / split_by_worker inside __iter__. Skip the
+        # wrap; the DataLoader as-is is correct.
+        from torch.utils.data import IterableDataset
+        if isinstance(loader.dataset, IterableDataset):
+            return loader
         sampler = DistributedSampler(loader.dataset, shuffle=shuffle)
         loader = DataLoader(loader.dataset,
                             loader.batch_size,
