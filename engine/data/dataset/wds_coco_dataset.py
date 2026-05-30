@@ -294,8 +294,32 @@ class WebDatasetCocoDetection(torch.utils.data.IterableDataset, DetDataset):
         from kwcoco_dataloader.readers.detection import (
             relabel_detection_sample,
         )
+        # When epoch_length is pinned (the right configuration for any
+        # DDP run, see below), rebuild the underlying stream whenever it
+        # exhausts so the iterator yields exactly epoch_length samples
+        # regardless of how unevenly the bucket shards split across
+        # ranks/workers. Without this auto-cycle, ranks with fewer
+        # shards run out of data before epoch_length, then later DDP
+        # collectives find one rank waiting and one rank gone:
+        #   RuntimeError: Detected mismatch between collectives on
+        #   ranks. Rank 0 ... BROADCAST ... Rank 1 ... REDUCE
+        # (host-gpu2x-wds matrix scenario 2026-05-30 reproduced
+        # this on yardrat.) With epoch_length=0 (no pin), we keep
+        # the original drain-once semantics — single-rank training
+        # and the kit's existing gen001 path rely on it.
+        def _cycle():
+            while True:
+                stream = self._build_stream()
+                yielded = False
+                for sample in stream:
+                    yielded = True
+                    yield sample
+                if not yielded:
+                    return  # empty corpus — don't spin forever
+                if self._epoch_length <= 0:
+                    return  # caller wants one pass only
         n = 0
-        for sample in self._build_stream():
+        for sample in _cycle():
             sample = relabel_detection_sample(sample, self.scheme)
             if not sample.target.get("annotations"):
                 # All annotations were dropped by the scheme collapse —
