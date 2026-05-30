@@ -142,8 +142,28 @@ def is_main_process():
 
 
 def save_on_master(*args, **kwargs):
+    """Save a checkpoint from rank 0, then synchronize all ranks so
+    that file IO is durable before any rank proceeds.
+
+    Without the trailing barrier, downstream code that immediately
+    reads the just-written file (e.g. det_solver.fit()'s
+    `load_resume_state(best_stg1.pth)` at the start of every epoch
+    when `stop_epoch` is set) races: rank 0 is still writing the
+    checkpoint while rank 1+ already calls torch.load on a partial
+    file → silent exception → rank exits → the next collective on
+    the surviving rank fingerprints-mismatches the absent rank and
+    DDP dies with:
+
+      RuntimeError: Detected mismatch between collectives on ranks.
+      Rank 0 ... BROADCAST ... Rank 1 ... GATHER seq=0
+
+    (yardrat 2026-05-30: host-gpu2x-jpeg + host-gpu2x-wds both
+    reproduced this between epoch 0 and epoch 1.)
+    """
     if is_main_process():
         torch.save(*args, **kwargs)
+    if is_dist_available_and_initialized():
+        torch.distributed.barrier()
 
 
 
