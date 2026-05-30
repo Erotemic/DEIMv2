@@ -41,12 +41,21 @@ def setup_distributed(print_rank: int=0, print_method: str='builtin', seed: int=
         WORLD_SIZE = int(os.getenv('WORLD_SIZE', 1))
 
         # torch.distributed.init_process_group(backend=backend, init_method='env://')
-        torch.distributed.init_process_group(init_method='env://')
+        # On CPU-only hosts (no CUDA available — CI, the wds_e2e_demo
+        # on a GPU-less box) NCCL isn't usable. Fall back to gloo so
+        # dist init succeeds; the loss is intra-node bandwidth but
+        # that doesn't matter for a single-process smoke run.
+        if torch.cuda.is_available():
+            torch.distributed.init_process_group(init_method='env://')
+        else:
+            torch.distributed.init_process_group(backend='gloo',
+                                                 init_method='env://')
         torch.distributed.barrier()
 
         rank = torch.distributed.get_rank()
-        torch.cuda.set_device(rank)
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.set_device(rank)
+            torch.cuda.empty_cache()
         enabled_dist = True
         if get_rank() == print_rank:
             print('Initialized distributed mode...')
@@ -149,11 +158,36 @@ def warp_model(
 ):
     if is_dist_available_and_initialized():
         rank = get_rank()
-        model = nn.SyncBatchNorm.convert_sync_batchnorm(model) if sync_bn else model
+        # SyncBatchNorm is CUDA-only — DDP rejects it on CPU modules.
+        # Silently skip the conversion in CPU-only runs (the
+        # wds_e2e_demo on a GPU-less host) since plain BN is fine for
+        # a single-process smoke run.
+        effective_sync_bn = sync_bn and torch.cuda.is_available()
+        model = nn.SyncBatchNorm.convert_sync_batchnorm(model) if effective_sync_bn else model
+        # DDP's device_ids/output_device only accept CUDA module
+        # parameters. When CUDA is unavailable (CPU-only environments
+        # — CI, the wds_e2e_demo on a GPU-less host), the model stays
+        # on CPU and `DDP(..., device_ids=[rank])` raises
+        # "module parameters {device(type='cpu')}". For DDP on CPU,
+        # passing `device_ids=None, output_device=None` is the
+        # supported form (the gloo backend wraps CPU tensors). For
+        # local single-process runs without dist init we already
+        # skip this branch.
+        cuda_ready = torch.cuda.is_available()
+        ddp_kwargs = (
+            dict(device_ids=[rank], output_device=rank)
+            if cuda_ready
+            else dict(device_ids=None, output_device=None)
+        )
         if dist_mode == 'dp':
-            model = DP(model, device_ids=[rank], output_device=rank)
+            if not cuda_ready:
+                # nn.DataParallel requires CUDA. Skip wrap entirely.
+                pass
+            else:
+                model = DP(model, device_ids=[rank], output_device=rank)
         elif dist_mode == 'ddp':
-            model = DDP(model, device_ids=[rank], output_device=rank, find_unused_parameters=find_unused_parameters)
+            model = DDP(model, find_unused_parameters=find_unused_parameters,
+                        **ddp_kwargs)
         else:
             raise AttributeError('')
 

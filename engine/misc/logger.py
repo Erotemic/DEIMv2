@@ -40,7 +40,11 @@ class SmoothedValue(object):
         """
         if not is_dist_available_and_initialized():
             return
-        t = torch.tensor([self.count, self.total], dtype=torch.float64, device='cuda')
+        # device='cuda' crashes on CPU-only hosts (wds_e2e_demo on a
+        # GPU-less box). Use the same device as the rest of the
+        # process: cuda when available, cpu otherwise.
+        _sync_dev = 'cuda' if torch.cuda.is_available() else 'cpu'
+        t = torch.tensor([self.count, self.total], dtype=torch.float64, device=_sync_dev)
         tdist.barrier()
         tdist.all_reduce(t)
         t = t.tolist()
