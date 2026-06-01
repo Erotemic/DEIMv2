@@ -176,6 +176,28 @@ class WebDatasetCocoDetection(torch.utils.data.IterableDataset, DetDataset):
         # spent re-parsing the same data. Cache after the first compute.
         self._len_cached: Optional[int] = None
 
+        # Log the effective semantic config so reproducing a run from
+        # the slurm log doesn't require inspecting env vars or env
+        # dumps. KCD_WDS_SKIP_EMPTY + KCD_WDS_BUCKET_WEIGHTS_JSON both
+        # change training-set composition; the journal entry for a
+        # run should record what these were. Each worker prints once
+        # at __init__; the kit submit scripts also echo their settings
+        # before launch.
+        _skip_empty_now = os.environ.get("KCD_WDS_SKIP_EMPTY", "0") == "1"
+        try:
+            import sys as _sys
+            print(
+                f"[wds_coco_dataset] pid={os.getpid()} "
+                f"skip_empty={_skip_empty_now} "
+                f"bucket_weights={self._bucket_weights or '<uniform>'} "
+                f"stream_kwargs={self._stream_kwargs} "
+                f"epoch_length={self._epoch_length} "
+                f"shards_dpath={self.shards_dpath}",
+                file=_sys.stderr, flush=True,
+            )
+        except Exception:
+            pass
+
         # Probe at construction so a missing shards path fails loudly,
         # not after the first epoch starts.
         self._buckets = self._discover_buckets()
