@@ -291,6 +291,10 @@ class WebDatasetCocoDetection(torch.utils.data.IterableDataset, DetDataset):
         ))
 
     def __iter__(self):
+        import os
+        import signal
+        import threading
+        import time
         from kwcoco_dataloader.readers.detection import (
             relabel_detection_sample,
         )
@@ -318,8 +322,51 @@ class WebDatasetCocoDetection(torch.utils.data.IterableDataset, DetDataset):
                     return  # empty corpus — don't spin forever
                 if self._epoch_length <= 0:
                     return  # caller wants one pass only
+
+        # Watchdog: PIL.Image.load() holds the GIL through the entire
+        # decode, so signal-based or thread-based timeouts can't
+        # interrupt it. We've observed PIL.load deadlock on rare valid
+        # JPEGs (kit zombie job 2553, 2026-05-30 → 2026-06-01: 5-day
+        # silent hang on a clean shard, root cause buried in webdataset
+        # autodecode + PIL interaction). The only reliable recovery is
+        # to kill the worker; PyTorch's DataLoader respawns it
+        # automatically. Set timeout to 0 to disable.
+        sample_timeout_s = float(os.environ.get(
+            "KCD_WDS_SAMPLE_TIMEOUT_S", "120"))
+        if sample_timeout_s > 0:
+            last_progress = [time.monotonic()]
+            stop_watchdog = threading.Event()
+
+            def _watchdog():
+                while not stop_watchdog.wait(5.0):
+                    elapsed = time.monotonic() - last_progress[0]
+                    if elapsed > sample_timeout_s:
+                        # Last-ditch logging before suicide; DataLoader
+                        # will respawn this worker and training continues.
+                        try:
+                            import sys
+                            print(
+                                f"[wds_coco_dataset] worker pid={os.getpid()} "
+                                f"stalled {elapsed:.0f}s in sample decode "
+                                f"(KCD_WDS_SAMPLE_TIMEOUT_S={sample_timeout_s}); "
+                                f"SIGKILL-ing self so DataLoader respawns. "
+                                f"See journal 2026-06-01_*.md.",
+                                file=sys.stderr, flush=True,
+                            )
+                        except Exception:
+                            pass
+                        os.kill(os.getpid(), signal.SIGKILL)
+
+            t = threading.Thread(target=_watchdog, daemon=True)
+            t.start()
+        else:
+            last_progress = None
+            stop_watchdog = None
+
         n = 0
         for sample in _cycle():
+            if last_progress is not None:
+                last_progress[0] = time.monotonic()
             sample = relabel_detection_sample(sample, self.scheme)
             if not sample.target.get("annotations"):
                 # All annotations were dropped by the scheme collapse —
@@ -336,7 +383,11 @@ class WebDatasetCocoDetection(torch.utils.data.IterableDataset, DetDataset):
             yield img, target
             n += 1
             if self._epoch_length and n >= self._epoch_length:
+                if stop_watchdog is not None:
+                    stop_watchdog.set()
                 return
+        if stop_watchdog is not None:
+            stop_watchdog.set()
 
     def _make_target(self, sample, image_size):
         """Convert a kwcoco_dataloader Sample's annotations into
