@@ -29,6 +29,7 @@ Caveats / constraints:
 from __future__ import annotations
 
 import json
+import os
 import random
 from pathlib import Path
 from typing import List, Optional, Sequence
@@ -135,6 +136,27 @@ class WebDatasetCocoDetection(torch.utils.data.IterableDataset, DetDataset):
             mapping=dict(source_to_target),
         )
 
+        # Bucket weights are merged from two sources, env-var first so
+        # YAML configs win when both are set. JSON in the env var maps
+        # bucket NAME (e.g. "dominant_raw_class_EQ_P", but partial
+        # substring matches also work) to a float weight; missing
+        # buckets get the default 1.0.
+        import json as _json
+        env_weights = os.environ.get("KCD_WDS_BUCKET_WEIGHTS_JSON", "").strip()
+        if env_weights:
+            try:
+                env_dict = _json.loads(env_weights)
+                if not isinstance(env_dict, dict):
+                    raise TypeError("must be a JSON object")
+                bucket_weights = {**env_dict, **(bucket_weights or {})}
+            except Exception as e:
+                import sys as _sys
+                print(
+                    f"[wds_coco_dataset] WARNING: failed to parse "
+                    f"KCD_WDS_BUCKET_WEIGHTS_JSON: {e}. "
+                    f"Got: {env_weights!r}",
+                    file=_sys.stderr,
+                )
         self._bucket_weights = bucket_weights or {}
         self._chunk_size = int(chunk_size)
         self._num_workers_hint = int(num_workers_hint)
@@ -363,16 +385,35 @@ class WebDatasetCocoDetection(torch.utils.data.IterableDataset, DetDataset):
             last_progress = None
             stop_watchdog = None
 
+        # Whether to drop samples whose annotations are entirely
+        # empty (or got dropped by the scheme collapse). Old default
+        # was True — silently filter empties so the matcher never
+        # sees "no target" items. That turned out to be wrong: for
+        # detection-AP training, NEGATIVE TILES are valuable signal,
+        # and silently filtering them caused gen002 single_sealion
+        # to over-fit to a small positive pool (each positive tile
+        # seen ~38× per epoch vs v5's ~1×) → kit AP 0.024 vs v5's
+        # 0.177 = 7.4× regression (journal 2026-06-01). Default is
+        # now False (keep empties); set KCD_WDS_SKIP_EMPTY=1 to opt
+        # back into the old behavior.
+        skip_empty = os.environ.get("KCD_WDS_SKIP_EMPTY", "0") == "1"
+
         n = 0
         for sample in _cycle():
             if last_progress is not None:
                 last_progress[0] = time.monotonic()
             sample = relabel_detection_sample(sample, self.scheme)
-            if not sample.target.get("annotations"):
-                # All annotations were dropped by the scheme collapse —
-                # this sample is effectively background. Skip so the
-                # matcher doesn't see empty-target items it can't use.
+            if skip_empty and not sample.target.get("annotations"):
+                # Legacy behavior — skip background-only tiles. Kept
+                # behind KCD_WDS_SKIP_EMPTY=1 in case a downstream
+                # config relies on the old contract; new runs should
+                # leave it off and let empty tiles flow through as
+                # negative samples.
                 continue
+            # Ensure annotations key exists even when empty (the
+            # collate / matcher path expects a list, not missing).
+            if "annotations" not in sample.target:
+                sample.target["annotations"] = []
 
             img = Image.fromarray(sample.image)
             target = self._make_target(sample, img.size)
