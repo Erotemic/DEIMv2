@@ -67,6 +67,15 @@ class WebDatasetCocoDetection(torch.utils.data.IterableDataset, DetDataset):
         transforms: DEIMv2 transform stack (injected via __inject__).
         bucket_weights: optional dict mapping bucket name -> float weight
             for :class:`WeightedChunkMix`. Defaults to equal weights.
+            Experiment-defining: must be set per-experiment via the
+            YAML config / CLI flag, not via env (see
+            ``feedback_no_env_for_experiment_config``).
+        skip_empty: drop samples whose post-scheme-collapse annotation
+            list is empty. Default False: empty tiles are valuable
+            negative signal for detection AP. Set True only to
+            reproduce the pre-gen003 contract that over-fit
+            single_sealion. Experiment-defining: must be set per
+            experiment via YAML / CLI flag, never env.
         chunk_size: WeightedChunkMix block size (default 1).
         num_workers_hint: heuristic for splitting shards across workers
             in :func:`load_bucket_streams`.
@@ -87,6 +96,7 @@ class WebDatasetCocoDetection(torch.utils.data.IterableDataset, DetDataset):
         return_masks: bool = False,
         remap_mscoco_category: bool = False,
         bucket_weights: Optional[dict] = None,
+        skip_empty: bool = False,
         chunk_size: int = 1,
         num_workers_hint: int = 4,
         epoch_length: int = 0,
@@ -136,28 +146,16 @@ class WebDatasetCocoDetection(torch.utils.data.IterableDataset, DetDataset):
             mapping=dict(source_to_target),
         )
 
-        # Bucket weights are merged from two sources, env-var first so
-        # YAML configs win when both are set. JSON in the env var maps
-        # bucket NAME (e.g. "dominant_raw_class_EQ_P", but partial
-        # substring matches also work) to a float weight; missing
-        # buckets get the default 1.0.
-        import json as _json
-        env_weights = os.environ.get("KCD_WDS_BUCKET_WEIGHTS_JSON", "").strip()
-        if env_weights:
-            try:
-                env_dict = _json.loads(env_weights)
-                if not isinstance(env_dict, dict):
-                    raise TypeError("must be a JSON object")
-                bucket_weights = {**env_dict, **(bucket_weights or {})}
-            except Exception as e:
-                import sys as _sys
-                print(
-                    f"[wds_coco_dataset] WARNING: failed to parse "
-                    f"KCD_WDS_BUCKET_WEIGHTS_JSON: {e}. "
-                    f"Got: {env_weights!r}",
-                    file=_sys.stderr,
-                )
-        self._bucket_weights = bucket_weights or {}
+        # Experiment-defining knobs come from the YAML config (which the
+        # kit's _build_train_yml fills from CLI flags forwarded by the
+        # submit script). Never read os.environ here:
+        # KCD_WDS_BUCKET_WEIGHTS_JSON / KCD_WDS_SKIP_EMPTY used to be
+        # read here and produced silent reproducibility hazards (a stray
+        # shell-rc export could change training-set composition without
+        # any script-visible record). See agent memory
+        # feedback_no_env_for_experiment_config.
+        self._bucket_weights = dict(bucket_weights) if bucket_weights else {}
+        self._skip_empty = bool(skip_empty)
         self._chunk_size = int(chunk_size)
         self._num_workers_hint = int(num_workers_hint)
         # Keep WebDatasetStream's shuffle buffers small enough that
@@ -177,18 +175,13 @@ class WebDatasetCocoDetection(torch.utils.data.IterableDataset, DetDataset):
         self._len_cached: Optional[int] = None
 
         # Log the effective semantic config so reproducing a run from
-        # the slurm log doesn't require inspecting env vars or env
-        # dumps. KCD_WDS_SKIP_EMPTY + KCD_WDS_BUCKET_WEIGHTS_JSON both
-        # change training-set composition; the journal entry for a
-        # run should record what these were. Each worker prints once
-        # at __init__; the kit submit scripts also echo their settings
-        # before launch.
-        _skip_empty_now = os.environ.get("KCD_WDS_SKIP_EMPTY", "0") == "1"
+        # the slurm log doesn't require running the kit. Each worker
+        # prints once at __init__.
         try:
             import sys as _sys
             print(
                 f"[wds_coco_dataset] pid={os.getpid()} "
-                f"skip_empty={_skip_empty_now} "
+                f"skip_empty={self._skip_empty} "
                 f"bucket_weights={self._bucket_weights or '<uniform>'} "
                 f"stream_kwargs={self._stream_kwargs} "
                 f"epoch_length={self._epoch_length} "
@@ -328,9 +321,28 @@ class WebDatasetCocoDetection(torch.utils.data.IterableDataset, DetDataset):
             ]
         else:
             weights = bucket_set.weights
+        # WeightedChunkMix has two modes:
+        #   * restart=True (default) — exhausted sources are re-iter()
+        #     ed so the weighted mix continues. Mixer only terminates
+        #     when its epoch_size cap is hit. Required when the
+        #     adapter caller pinned epoch_length: we want the mixer
+        #     to keep producing until the outer adapter loop has
+        #     yielded epoch_length samples, even if some buckets are
+        #     small relative to that cap.
+        #   * restart=False — "drain once". An exhausted source stays
+        #     dead; mixer terminates when every source has produced
+        #     its content exactly once. Use when epoch_length == 0
+        #     so each worker's share is drained once (split_by_worker
+        #     gives each worker ~1/N of the shards) and no sample is
+        #     duplicated within an epoch.
+        if self._epoch_length > 0:
+            restart_mode = True
+        else:
+            restart_mode = False
         return iter(WeightedChunkMix(
             bucket_set.streams, weights,
             chunk_size=self._chunk_size,
+            restart=restart_mode,
             seed=self._epoch,
         ))
 
@@ -407,18 +419,12 @@ class WebDatasetCocoDetection(torch.utils.data.IterableDataset, DetDataset):
             last_progress = None
             stop_watchdog = None
 
-        # Whether to drop samples whose annotations are entirely
-        # empty (or got dropped by the scheme collapse). Old default
-        # was True — silently filter empties so the matcher never
-        # sees "no target" items. That turned out to be wrong: for
-        # detection-AP training, NEGATIVE TILES are valuable signal,
-        # and silently filtering them caused gen002 single_sealion
-        # to over-fit to a small positive pool (each positive tile
-        # seen ~38× per epoch vs v5's ~1×) → kit AP 0.024 vs v5's
-        # 0.177 = 7.4× regression (journal 2026-06-01). Default is
-        # now False (keep empties); set KCD_WDS_SKIP_EMPTY=1 to opt
-        # back into the old behavior.
-        skip_empty = os.environ.get("KCD_WDS_SKIP_EMPTY", "0") == "1"
+        # Empty tiles are negative signal for detection AP. Old default
+        # was True (filter empties) — that caused gen002 single_sealion
+        # to over-fit to a small positive pool (each positive seen
+        # ~38× per epoch) → kit AP 0.024 vs v5's 0.177 (journal
+        # 2026-06-01). Default now False. Set via constructor only.
+        skip_empty = self._skip_empty
 
         n = 0
         for sample in _cycle():
@@ -426,11 +432,6 @@ class WebDatasetCocoDetection(torch.utils.data.IterableDataset, DetDataset):
                 last_progress[0] = time.monotonic()
             sample = relabel_detection_sample(sample, self.scheme)
             if skip_empty and not sample.target.get("annotations"):
-                # Legacy behavior — skip background-only tiles. Kept
-                # behind KCD_WDS_SKIP_EMPTY=1 in case a downstream
-                # config relies on the old contract; new runs should
-                # leave it off and let empty tiles flow through as
-                # negative samples.
                 continue
             # Ensure annotations key exists even when empty (the
             # collate / matcher path expects a list, not missing).
