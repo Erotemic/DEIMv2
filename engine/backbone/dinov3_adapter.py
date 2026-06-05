@@ -88,17 +88,38 @@ class DINOv3STAs(nn.Module):
         if 'dinov3' in name:
             self.dinov3 = DinoVisionTransformer(name=name)
             if weights_path is not None and os.path.exists(weights_path):
-                print(f'Loading ckpt from {weights_path}...')
+                print(f'DINOv3STAs: loaded backbone weights from {weights_path}')
                 self.dinov3.load_state_dict(torch.load(weights_path))
             else:
-                print('Training DINOv3 from scratch...')
+                # The previous message ("Training DINOv3 from scratch...")
+                # was misleading: it fires at every model construction even
+                # when the caller will load full-checkpoint weights via
+                # --tuning / --resume at the DEIM solver level (which
+                # overwrites this random init). Be neutral instead.
+                print(
+                    f'DINOv3STAs: backbone weights_path '
+                    f'{weights_path!r} not found; backbone constructed '
+                    f'with random init. (If a DEIM checkpoint is loaded '
+                    f'via --tuning/--resume the backbone will be '
+                    f'overwritten then.)'
+                )
         else:
             self.dinov3 =  VisionTransformer(embed_dim=embed_dim, num_heads=num_heads, return_layers=interaction_indexes)
             if weights_path is not None and os.path.exists(weights_path):
-                print(f'Loading ckpt from {weights_path}...')
+                print(f'DINOv3STAs (ViT-Tiny): loaded backbone weights from {weights_path}')
                 self.dinov3._model.load_state_dict(torch.load(weights_path))
             else:
-                print('Training ViT-Tiny from scratch...')
+                # Same neutral-init message as the DINOv3 branch above.
+                # The old "Training ViT-Tiny from scratch..." print was
+                # the source of "is it training during eval?" confusion
+                # (see kit forensic journal 2026-06-04).
+                print(
+                    f'DINOv3STAs (ViT-Tiny): backbone weights_path '
+                    f'{weights_path!r} not found; backbone constructed '
+                    f'with random init. (If a DEIM checkpoint is loaded '
+                    f'via --tuning/--resume the backbone will be '
+                    f'overwritten then.)'
+                )
 
         embed_dim = self.dinov3.embed_dim
         self.interaction_indexes = interaction_indexes
