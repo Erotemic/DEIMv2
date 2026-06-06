@@ -13,6 +13,16 @@ import os
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 
+# Accept slightly-truncated JPEGs instead of crashing eval mid-run.
+# The VIAME sea lion corpus build report (2026-06-05) flagged 3
+# unreadable images that survived into the kwcoco bundles with
+# width/height=None; rather than re-pipeline the splits, allow
+# PIL to load with padding. Slight visual artifact on those 3,
+# unchanged everywhere else. Queue for upstream PR per the
+# kit's reference_deimv2_upstream_patches memory.
+from PIL import ImageFile as _PIL_ImageFile  # noqa: E402
+_PIL_ImageFile.LOAD_TRUNCATED_IMAGES = True
+
 import argparse
 
 from engine.misc import dist_utils
