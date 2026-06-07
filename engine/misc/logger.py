@@ -204,6 +204,13 @@ class MetricLogger(object):
                 '{meters}',
                 'time: {time}',
                 'data: {data}',
+                # cur mem = current working set (torch.cuda.memory_allocated),
+                #   the steady-state footprint that predicts trainability.
+                # max mem = monotonic high-water mark since process start
+                #   (torch.cuda.max_memory_allocated) — climbs to the single
+                #   worst-case batch's peak and sticks; NOT a leak. See
+                #   docs/journals/2026-06-04_deimv2_training_internals.md sec 6.
+                'cur mem: {cur_memory:.0f}',
                 'max mem: {memory:.0f}'
             ])
         else:
@@ -228,6 +235,7 @@ class MetricLogger(object):
                         i, len(iterable), eta=eta_string,
                         meters=str(self),
                         time=str(iter_time), data=str(data_time),
+                        cur_memory=torch.cuda.memory_allocated() / MB,
                         memory=torch.cuda.max_memory_allocated() / MB))
                 else:
                     print(log_msg.format(
