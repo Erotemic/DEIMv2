@@ -10,8 +10,14 @@ from typing import List, Tuple
 
 
 def generalized_box_iou(boxes1: Tensor, boxes2: Tensor) -> Tensor:
-    assert (boxes1[:, 2:] >= boxes1[:, :2]).all()
-    assert (boxes2[:, 2:] >= boxes2[:, :2]).all()
+    # Clamp degenerate boxes (x2<x1 / y2<y1) to zero-area instead of
+    # asserting — predicted boxes can go negative-wh under AMP and the hard
+    # assert (here AND inside torchvision's giou) kills DDP training over one
+    # transient box. (kwcoco_detector_kit patch; queue for upstream.)
+    boxes1 = torch.cat(
+        [boxes1[:, :2], torch.maximum(boxes1[:, 2:], boxes1[:, :2])], dim=-1)
+    boxes2 = torch.cat(
+        [boxes2[:, :2], torch.maximum(boxes2[:, 2:], boxes2[:, :2])], dim=-1)
     return torchvision.ops.generalized_box_iou(boxes1, boxes2)
 
 
@@ -44,8 +50,12 @@ def elementwise_generalized_box_iou(boxes1: Tensor, boxes2: Tensor) -> Tensor:
     Returns:
         giou, [N, ]
     """
-    assert (boxes1[:, 2:] >= boxes1[:, :2]).all()
-    assert (boxes2[:, 2:] >= boxes2[:, :2]).all()
+    # Clamp degenerate boxes instead of asserting (AMP can produce negative-wh
+    # predictions; see generalized_box_iou above).
+    boxes1 = torch.cat(
+        [boxes1[:, :2], torch.maximum(boxes1[:, 2:], boxes1[:, :2])], dim=-1)
+    boxes2 = torch.cat(
+        [boxes2[:, :2], torch.maximum(boxes2[:, 2:], boxes2[:, :2])], dim=-1)
     iou, union = elementwise_box_iou(boxes1, boxes2)
     lt = torch.min(boxes1[:, :2], boxes2[:, :2]) # [N, 2]
     rb = torch.max(boxes1[:, 2:], boxes2[:, 2:]) # [N, 2]

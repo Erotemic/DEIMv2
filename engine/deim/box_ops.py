@@ -48,10 +48,15 @@ def generalized_box_iou(boxes1, boxes2):
     Returns a [N, M] pairwise matrix, where N = len(boxes1)
     and M = len(boxes2)
     """
-    # degenerate boxes gives inf / nan results
-    # so do an early check
-    assert (boxes1[:, 2:] >= boxes1[:, :2]).all()
-    assert (boxes2[:, 2:] >= boxes2[:, :2]).all()
+    # Degenerate boxes (x2<x1 / y2<y1) give inf/nan. The predicted boxes can
+    # go slightly negative-wh under AMP; a hard assert there kills multi-hour
+    # DDP training over a single transient box. Clamp to zero-area (x2>=x1,
+    # y2>=y1) instead — non-degenerate boxes are untouched, and giou handles
+    # zero-area boxes. (kwcoco_detector_kit patch; queue for upstream.)
+    boxes1 = torch.cat(
+        [boxes1[:, :2], torch.maximum(boxes1[:, 2:], boxes1[:, :2])], dim=-1)
+    boxes2 = torch.cat(
+        [boxes2[:, :2], torch.maximum(boxes2[:, 2:], boxes2[:, :2])], dim=-1)
     iou, union = box_iou(boxes1, boxes2)
 
     lt = torch.min(boxes1[:, None, :2], boxes2[:, :2])
