@@ -67,10 +67,7 @@ def main(args, ):
 
     output_file = args.resume.replace('.pth', '.onnx') if args.resume else 'model.onnx'
 
-    torch.onnx.export(
-        model,
-        (data, size),
-        output_file,
+    export_kwargs = dict(
         input_names=['images', 'orig_target_sizes'],
         output_names=['labels', 'boxes', 'scores'],
         dynamic_axes=dynamic_axes,
@@ -78,6 +75,16 @@ def main(args, ):
         verbose=False,
         do_constant_folding=True,
     )
+    # Force the legacy TorchScript exporter. On torch>=2.9 torch.onnx.export
+    # defaults to dynamo=True, whose FX type-promotion pass asserts
+    # "Expected same OpOverload packet, got prim.device != aten.mul" on this
+    # model's graph, killing the post-train export step. The TorchScript path
+    # exports this model cleanly. (kwcoco_detector_kit patch; queue upstream.)
+    import inspect
+    if 'dynamo' in inspect.signature(torch.onnx.export).parameters:
+        export_kwargs['dynamo'] = False
+
+    torch.onnx.export(model, (data, size), output_file, **export_kwargs)
 
     if args.check:
         import onnx
