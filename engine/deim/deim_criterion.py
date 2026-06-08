@@ -429,21 +429,38 @@ class DEIMCriterion(nn.Module):
         losses = {k:torch.nan_to_num(v, nan=0.0) for k, v in losses.items()}
         return losses
 
-    @staticmethod
-    def _align_loss_keys_across_ranks(losses):
+    # Number of initial steps over which to gather the loss-key union across
+    # ranks. These ALL fall inside epoch 0 (before the first eval), so the
+    # process group is never desynced when we gather — which is exactly the
+    # condition that made the per-step all_gather_object resize to a garbage
+    # ~1EB size on the first step after an eval (dinov3_x OOM at epoch 17).
+    _LOSS_KEY_ALIGN_WARMUP = 500
+
+    def _align_loss_keys_across_ranks(self, losses):
         if not is_dist_available_and_initialized():
             return losses
         world_size = get_world_size()
         if world_size < 2:
             return losses
-        local_keys = sorted(losses.keys())
-        gathered = [None] * world_size
-        torch.distributed.all_gather_object(gathered, local_keys)
-        union = set()
-        for k_list in gathered:
-            if k_list is not None:
-                union.update(k_list)
-        missing = union - set(local_keys)
+        local_keys = set(losses.keys())
+        if not hasattr(self, "_loss_key_union"):
+            self._loss_key_union = set()
+            self._loss_key_align_step = 0
+        # Gather across ranks ONLY during warmup (all ranks step in lockstep,
+        # so this stays collective-correct), accumulating the key union. After
+        # warmup we pad from the cached union with NO collective — removing the
+        # every-step all_gather_object whose dynamic resize hit a garbage size
+        # on a post-eval collective desync. 500 diverse epoch-0 batches cover
+        # the GT/no-GT (dn-loss) and aux key variations.
+        if self._loss_key_align_step < self._LOSS_KEY_ALIGN_WARMUP:
+            self._loss_key_align_step += 1
+            gathered = [None] * world_size
+            torch.distributed.all_gather_object(gathered, sorted(local_keys))
+            for k_list in gathered:
+                if k_list is not None:
+                    self._loss_key_union.update(k_list)
+        self._loss_key_union.update(local_keys)
+        missing = self._loss_key_union - local_keys
         if not missing:
             return losses
         # Use a representative existing tensor for device/dtype so
