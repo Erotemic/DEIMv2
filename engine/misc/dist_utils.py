@@ -242,6 +242,23 @@ def warp_loader(loader, shuffle=False):
     return loader
 
 
+def rebuild_loader_with_sampler(loader, sampler):
+    """Rebuild a DataLoader around an explicit, already rank-aware sampler.
+
+    Unlike warp_loader (dist-only, hardcodes DistributedSampler) this is
+    used in BOTH dist and non-dist runs — the given sampler owns the
+    per-rank split. Added for kwcoco_detector_kit's optional
+    dataloader-level balanced sampling (kcd_sample_weights_fpath).
+    """
+    return DataLoader(loader.dataset,
+                      loader.batch_size,
+                      sampler=sampler,
+                      drop_last=loader.drop_last,
+                      collate_fn=loader.collate_fn,
+                      pin_memory=loader.pin_memory,
+                      num_workers=loader.num_workers)
+
+
 
 def is_parallel(model) -> bool:
     # Returns True if model is of type DP or DDP

@@ -83,9 +83,30 @@ class BaseSolver(object):
         self.lr_scheduler = self.cfg.lr_scheduler
         self.lr_warmup_scheduler = self.cfg.lr_warmup_scheduler
 
-        self.train_dataloader = dist_utils.warp_loader(
-            self.cfg.train_dataloader, shuffle=self.cfg.train_dataloader.shuffle
-        )
+        # kwcoco_detector_kit: optional dataloader-level balanced sampling.
+        # When the kit config carries kcd_sample_weights_fpath, the default
+        # (Distributed)Sampler is replaced by a rank-aware weighted sampler
+        # built from the launch-time sidecar (see the kit's
+        # data/balanced_sampler.py). No-op when the key is absent.
+        _kcd_cfg = getattr(self.cfg, 'yaml_cfg', None) or {}
+        _kcd_weights_fpath = _kcd_cfg.get('kcd_sample_weights_fpath')
+        if _kcd_weights_fpath:
+            from kwcoco_detector_kit.data.balanced_sampler import (
+                sampler_from_weights_file,
+            )
+            _kcd_sampler = sampler_from_weights_file(
+                _kcd_weights_fpath,
+                dataset_len=len(self.cfg.train_dataloader.dataset),
+                epoch_length=_kcd_cfg.get('kcd_sample_epoch_length') or None,
+                seed=int(_kcd_cfg.get('kcd_sample_seed', 0) or 0),
+            )
+            self.train_dataloader = dist_utils.rebuild_loader_with_sampler(
+                self.cfg.train_dataloader, _kcd_sampler
+            )
+        else:
+            self.train_dataloader = dist_utils.warp_loader(
+                self.cfg.train_dataloader, shuffle=self.cfg.train_dataloader.shuffle
+            )
         self.val_dataloader = dist_utils.warp_loader(
             self.cfg.val_dataloader, shuffle=self.cfg.val_dataloader.shuffle
         )

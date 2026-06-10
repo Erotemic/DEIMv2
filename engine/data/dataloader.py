@@ -50,6 +50,13 @@ class DataLoader(data.DataLoader):
         self._epoch = epoch
         self.dataset.set_epoch(epoch)
         self.collate_fn.set_epoch(epoch)
+        # kwcoco_detector_kit: weighted samplers reseed per epoch. The
+        # solver only reaches sampler.set_epoch under torch.distributed;
+        # forwarding here covers single-GPU runs too (idempotent when the
+        # solver also calls it).
+        sampler = getattr(self, 'sampler', None)
+        if sampler is not None and hasattr(sampler, 'set_epoch'):
+            sampler.set_epoch(epoch)
 
     @property
     def epoch(self):
