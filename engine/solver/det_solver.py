@@ -116,15 +116,44 @@ class DetSolver(BaseSolver):
                 for checkpoint_path in checkpoint_paths:
                     dist_utils.save_on_master(self.state_dict(), checkpoint_path)
 
-            module = self.ema.module if self.ema else self.model
-            test_stats, coco_evaluator = evaluate(
-                module,
-                self.criterion,
-                self.postprocessor,
-                self.val_dataloader,
-                self.evaluator,
-                self.device
-            )
+            # --- kwcoco_detector_kit selection-journal emit ---------------
+            # When the kit sets `kcd_journal_dir`, stage the full state dict
+            # every epoch and append an `epoch_staged` row; a detached
+            # selection worker scores/retains/GCs (the trainer never
+            # decides). See the kit's docs/planning/checkpoint_selection.md.
+            _kcd_cfg = getattr(self.cfg, 'yaml_cfg', None) or {}
+            _kcd_journal_dir = _kcd_cfg.get('kcd_journal_dir')
+            if _kcd_journal_dir and self.output_dir:
+                from pathlib import Path as _KcdPath
+                _kcd_journal = _KcdPath(_kcd_journal_dir)
+                _kcd_staging = _kcd_journal.parent / 'staging'
+                if dist_utils.is_main_process():
+                    _kcd_staging.mkdir(parents=True, exist_ok=True)
+                    _kcd_journal.mkdir(parents=True, exist_ok=True)
+                _kcd_ckpt = _kcd_staging / f'epoch_{epoch:04d}.pth'
+                dist_utils.save_on_master(self.state_dict(), _kcd_ckpt)
+                if dist_utils.is_main_process():
+                    with open(_kcd_journal / 'train.jsonl', 'a') as _kcd_f:
+                        _kcd_f.write(json.dumps({
+                            'event': 'epoch_staged', 'epoch': int(epoch),
+                            'ckpt': f'staging/{_kcd_ckpt.name}',
+                            'time': time.time(),
+                        }) + '\n')
+
+            if _kcd_cfg.get('kcd_skip_inloop_val'):
+                # the selection worker owns eval; an empty test_stats
+                # no-ops the entire best_stat/best_stg machinery below
+                test_stats, coco_evaluator = {}, None
+            else:
+                module = self.ema.module if self.ema else self.model
+                test_stats, coco_evaluator = evaluate(
+                    module,
+                    self.criterion,
+                    self.postprocessor,
+                    self.val_dataloader,
+                    self.evaluator,
+                    self.device
+                )
 
             # Broadcast test_stats from rank 0 so every rank has the
             # SAME dict keys before the conditional save loop below.
@@ -213,6 +242,18 @@ class DetSolver(BaseSolver):
         total_time = time.time() - start_time
         total_time_str = str(datetime.timedelta(seconds=int(total_time)))
         print('Training time {}'.format(total_time_str))
+
+        # --- kwcoco_detector_kit selection-journal: training finished -----
+        _kcd_cfg = getattr(self.cfg, 'yaml_cfg', None) or {}
+        _kcd_journal_dir = _kcd_cfg.get('kcd_journal_dir')
+        if _kcd_journal_dir and dist_utils.is_main_process():
+            from pathlib import Path as _KcdPath
+            _kcd_journal = _KcdPath(_kcd_journal_dir)
+            _kcd_journal.mkdir(parents=True, exist_ok=True)
+            with open(_kcd_journal / 'train.jsonl', 'a') as _kcd_f:
+                _kcd_f.write(json.dumps({
+                    'event': 'train_complete', 'time': time.time(),
+                }) + '\n')
 
 
     def val(self, ):
