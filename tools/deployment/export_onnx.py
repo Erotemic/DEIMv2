@@ -56,7 +56,7 @@ def main(args, ):
     model = Model()
 
     img_size = cfg.yaml_cfg["eval_spatial_size"]
-    data = torch.rand(32, 3, *img_size)
+    data = torch.rand(1, 3, *img_size)  # batch=1: dim is dynamic; 32 OOMs at 1280px
     size = torch.tensor([img_size])
     _ = model(data, size)
 
