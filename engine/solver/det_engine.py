@@ -7,6 +7,7 @@ Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 """
 
 
+import os
 import sys
 import math
 from typing import Iterable
@@ -39,6 +40,17 @@ def train_one_epoch(self_lr_scheduler, lr_scheduler, model: torch.nn.Module, cri
 
     cur_iters = epoch * len(data_loader)
 
+    # AMP dtype. torch.autocast on CUDA defaults to float16, whose ~65504 max
+    # is narrow enough that a single activation excursion becomes inf and then
+    # NaN. bfloat16 has float32's exponent range, so the same excursion stays
+    # finite. Overridable via KCD_AMP_DTYPE for A/B testing; bf16 requires
+    # Ampere or newer, so fall back to fp16 on hardware that lacks it.
+    _amp_dtype_name = os.environ.get('KCD_AMP_DTYPE', 'bfloat16').lower()
+    if _amp_dtype_name in ('bf16', 'bfloat16') and torch.cuda.is_bf16_supported():
+        amp_dtype = torch.bfloat16
+    else:
+        amp_dtype = torch.float16
+
     for i, (samples, targets) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
         samples = samples.to(device)
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
@@ -46,11 +58,19 @@ def train_one_epoch(self_lr_scheduler, lr_scheduler, model: torch.nn.Module, cri
         metas = dict(epoch=epoch, step=i, global_step=global_step, epoch_step=len(data_loader))
 
         if scaler is not None:
-            with torch.autocast(device_type=str(device), cache_enabled=True):
+            with torch.autocast(device_type=str(device), dtype=amp_dtype, cache_enabled=True):
                 outputs = model(samples, targets=targets)
 
             if torch.isnan(outputs['pred_boxes']).any() or torch.isinf(outputs['pred_boxes']).any():
-                print(outputs['pred_boxes'])
+                # Fail fast. Upstream printed the tensor, dumped a full
+                # checkpoint, and CARRIED ON -- but once the weights are NaN
+                # every loss is exactly 0.0, so the gradients are 0 and finite,
+                # GradScaler never intervenes, and the run trains to completion
+                # producing nothing. fish job 489 burned 4 GPUs for 12 epochs
+                # that way, at 3x the step time, because the dump below ran
+                # every single step (819 MB and a 300x4 tensor print, each).
+                # Dump once for forensics, then abort so the failure costs
+                # minutes instead of a weekend.
                 state = model.state_dict()
                 new_state = {}
                 for key, value in model.state_dict().items():
@@ -60,6 +80,14 @@ def train_one_epoch(self_lr_scheduler, lr_scheduler, model: torch.nn.Module, cri
                     state[new_key] = value
                 new_state['model'] = state
                 dist_utils.save_on_master(new_state, "./NaN.pth")
+                raise RuntimeError(
+                    f'Non-finite pred_boxes at epoch {epoch} step {i} '
+                    f'(global_step {global_step}, amp dtype {amp_dtype}). '
+                    f'Model state dumped to ./NaN.pth. Aborting: training '
+                    f'past this point cannot recover -- the weights are NaN, '
+                    f'so every loss is 0.0 and no gradient will ever change '
+                    f'them. Resume from the last good epoch checkpoint.'
+                )
 
             with torch.autocast(device_type=str(device), enabled=False):
                 loss_dict = criterion(outputs, targets, **metas)
