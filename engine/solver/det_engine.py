@@ -40,12 +40,24 @@ def train_one_epoch(self_lr_scheduler, lr_scheduler, model: torch.nn.Module, cri
 
     cur_iters = epoch * len(data_loader)
 
-    # AMP dtype. torch.autocast on CUDA defaults to float16, whose ~65504 max
-    # is narrow enough that a single activation excursion becomes inf and then
-    # NaN. bfloat16 has float32's exponent range, so the same excursion stays
-    # finite. Overridable via KCD_AMP_DTYPE for A/B testing; bf16 requires
-    # Ampere or newer, so fall back to fp16 on hardware that lacks it.
-    _amp_dtype_name = os.environ.get('KCD_AMP_DTYPE', 'bfloat16').lower()
+    # AMP dtype. Default fp16, because that is what this recipe IS: DEIMv2
+    # mentions bfloat16 nowhere in its training path, constructs a GradScaler
+    # unconditionally (configs/runtime.yml:11) -- machinery that exists purely
+    # to keep fp16 gradients out of underflow, and a vestige under bf16 -- and
+    # every published COCO number was produced with plain `--use-amp`, i.e.
+    # torch's fp16 default.
+    #
+    # bf16 was tried on the fish project (gen003) on the theory that fp16's
+    # ~65504 ceiling was behind the NaN excursions. It was not: those are
+    # explained by an augmentation boundary landing on collate_fn.stop_epoch,
+    # fixed separately. bf16 finished at vali AP 0.5406 against 0.5440/0.5443
+    # for the fp16 runs, and it costs three mantissa bits (7 vs 10) in a model
+    # whose localization is fine-grained-distribution based (reg_max=32,
+    # loss_fgl, loss_ddf) and therefore precision-sensitive.
+    #
+    # Kept as an opt-in knob rather than removed: it is the right escape hatch
+    # if a genuine overflow ever shows up on newer hardware.
+    _amp_dtype_name = os.environ.get('KCD_AMP_DTYPE', 'float16').lower()
     if _amp_dtype_name in ('bf16', 'bfloat16') and torch.cuda.is_bf16_supported():
         amp_dtype = torch.bfloat16
     else:
