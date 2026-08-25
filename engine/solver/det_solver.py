@@ -213,35 +213,20 @@ class DetSolver(BaseSolver):
                 elif epoch >= self.train_dataloader.collate_fn.stop_epoch:
                     best_stat = {'epoch': -1, }
                     self.ema.decay -= 0.0001
-                    # Restore the BEST model, which is the whole point of this
-                    # branch. Upstream reloads best_stg1.pth unconditionally --
-                    # but best_stg1.pth is only ever WRITTEN while
-                    # `epoch < stop_epoch` (the else arms at lines 199 and 211).
-                    # Upstream's own configs put stop_epoch late in the run, so
-                    # for them best_stg1 accumulates the whole stage-1 phase and
-                    # the reload is sensible.
+                    # Upstream behaviour, restored. This reloads best_stg1.pth,
+                    # which accumulates the best checkpoint across the whole
+                    # first stage -- correct, because stop_epoch is now derived
+                    # from the recipe (12 of 14 for DINOv3-X) rather than pinned
+                    # to 1.
                     #
-                    # The kit pins stop_epoch=1 for train_policy=fixed
-                    # (trainers/deimv2.py:287), which freezes best_stg1.pth at
-                    # EPOCH 0 forever. Every non-improving eval then restored the
-                    # full training state -- model, optimizer, GradScaler, EMA,
-                    # LR warmup -- back to epoch 0. fish gen004 (job 492) took
-                    # that hit at epochs 2, 7, 13 and 19 and never beat its own
-                    # epoch-1 score in 21 epochs; the AP curve sawtoothed back to
-                    # ~0.52 after every reload. gen003 survived only because its
-                    # cosine phase improved monotonically so the branch rarely
-                    # fired.
-                    #
-                    # best_stg2.pth carries the global best for every
-                    # epoch >= stop_epoch (top1 is monotonic), so prefer it and
-                    # fall back only when it does not exist yet.
-                    _best = self.output_dir / 'best_stg2.pth'
-                    if not _best.exists():
-                        _best = self.output_dir / 'best_stg1.pth'
-                    self.load_resume_state(str(_best))
-                    print(f'Refresh EMA at epoch {epoch} with decay '
-                          f'{self.ema.decay} (restored {_best.name})')
-
+                    # It was briefly changed to prefer best_stg2.pth. That was a
+                    # workaround for the kit setting stop_epoch=1, which froze
+                    # best_stg1.pth at epoch 0 and made every reload a reset to
+                    # the start (fish job 492 hit it at epochs 2, 7, 13, 19).
+                    # With the configuration fixed at the source, the fork
+                    # should not carry a behavioural divergence.
+                    self.load_resume_state(str(self.output_dir / 'best_stg1.pth'))
+                    print(f'Refresh EMA at epoch {epoch} with decay {self.ema.decay}')
 
             log_stats = {
                 **{f'train_{k}': v for k, v in train_stats.items()},
