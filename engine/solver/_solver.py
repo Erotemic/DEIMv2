@@ -99,6 +99,7 @@ class BaseSolver(object):
                 dataset_len=len(self.cfg.train_dataloader.dataset),
                 epoch_length=_kcd_cfg.get('kcd_sample_epoch_length') or None,
                 seed=int(_kcd_cfg.get('kcd_sample_seed', 0) or 0),
+                replacement=bool(_kcd_cfg.get('kcd_sample_replacement', True)),
             )
             self.train_dataloader = dist_utils.rebuild_loader_with_sampler(
                 self.cfg.train_dataloader, _kcd_sampler
